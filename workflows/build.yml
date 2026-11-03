@@ -1,0 +1,63 @@
+name: Build IPA
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tools
+        run: brew install xcodegen ldid
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Build
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project SleepTalk.xcodeproj \
+            -scheme SleepTalk \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build | tee build.log | grep -E "error:|BUILD (SUCCEEDED|FAILED)" || true
+          test -d build/Build/Products/Release-iphoneos/SleepTalk.app
+
+      - name: Show compiler errors
+        if: failure()
+        run: grep -n -E "error:" build.log | head -50 || true
+
+      - name: Package for TrollStore
+        run: |
+          APP=build/Build/Products/Release-iphoneos/SleepTalk.app
+          ldid -SConfig/Entitlements.plist "$APP/SleepTalk"
+          mkdir Payload
+          cp -R "$APP" Payload/
+          zip -qry SleepTalk.tipa Payload
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SleepTalk-tipa
+          path: SleepTalk.tipa
+
+      - name: Publish download link
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view latest >/dev/null 2>&1 || \
+            gh release create latest --title "最新版本" --notes "用手机下载 SleepTalk.tipa，再用 TrollStore 打开安装。"
+          gh release upload latest SleepTalk.tipa --clobber
