@@ -16,6 +16,7 @@ struct SleepTalkApp: App {
                 .environmentObject(monitor)
                 .environmentObject(store)
                 .preferredColorScheme(.dark)
+                .tint(.indigo)
                 .onAppear {
                     let sessionStore = store
                     monitor.onSessionEnded = {

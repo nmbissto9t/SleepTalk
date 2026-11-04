@@ -102,6 +102,15 @@ struct WaveformModel: Equatable {
         }
     }
 
+    var totalDuration: TimeInterval {
+        durations.reduce(0, +)
+    }
+
+    func elapsed(clipIndex: Int, offset: TimeInterval) -> TimeInterval {
+        guard durations.indices.contains(clipIndex) else { return 0 }
+        return durations[..<clipIndex].reduce(0, +) + min(max(0, offset), durations[clipIndex])
+    }
+
     func barPosition(clipIndex: Int, offset: TimeInterval) -> Double {
         guard clipStarts.indices.contains(clipIndex) else { return 0 }
         let duration = max(0.001, durations[clipIndex])
@@ -125,6 +134,7 @@ struct WaveformView: View {
     let model: WaveformModel?
     /// 已播放到第几根柱子；没有在播放时为 nil。
     let progress: Double?
+    var height: CGFloat = 32
     let onSeek: (Double) -> Void
 
     var body: some View {
@@ -139,17 +149,17 @@ struct WaveformView: View {
                 let barWidth = max(1, slot * 0.65)
                 let maximum = max(0.0001, model.peak)
                 for (index, value) in model.bars.enumerated() where value >= 0 {
-                    // 按本段最大音量缩放，并稍微抬高小声部分，看起来更清楚。
-                    let level = CGFloat(pow(Double(value / maximum), 0.6))
-                    let height = max(2, level * size.height)
+                    // 按本段最大音量线性缩放，让安静的部分保持低矮，起伏更明显。
+                    let level = CGFloat(value / maximum)
+                    let barHeight = max(2, level * size.height)
                     let rect = CGRect(
                         x: CGFloat(index) * slot,
-                        y: (size.height - height) / 2,
+                        y: (size.height - barHeight) / 2,
                         width: barWidth,
-                        height: height
+                        height: barHeight
                     )
                     let played = progress.map { Double(index) < $0 } ?? false
-                    let color = played ? Color.indigo : Color.indigo.opacity(0.4)
+                    let color = played ? Color.indigo : Color.secondary.opacity(0.6)
                     context.fill(Path(roundedRect: rect, cornerRadius: barWidth / 2), with: .color(color))
                 }
             }
@@ -161,7 +171,7 @@ struct WaveformView: View {
                 }
             )
         }
-        .frame(height: 36)
+        .frame(height: height)
         .accessibilityLabel("波形，点按可跳转到对应位置")
     }
 }
@@ -171,13 +181,24 @@ struct WavePlaybackRow: View {
     let clips: [Clip]
     let sessionID: UUID
     let disabled: Bool
+    var compact = false
     @ObservedObject var player: ClipPlayer
 
     @State private var model: WaveformModel?
 
     /// 分组和组内第一段要区分开，否则展开后会共用播放状态。
-    private var playlistID: String {
+    static func playlistID(for clips: [Clip]) -> String {
         clips.count > 1 ? "group-\(clips[0].id.uuidString)" : clips[0].id.uuidString
+    }
+
+    private var playlistID: String { Self.playlistID(for: clips) }
+
+    private var timeText: String {
+        guard let model else { return "" }
+        let total = Format.playback(model.totalDuration)
+        guard isCurrent else { return total }
+        let elapsed = model.elapsed(clipIndex: player.clipIndex, offset: player.clipOffset)
+        return "\(Format.playback(elapsed)) / \(total)"
     }
     private var isCurrent: Bool { player.playlistID == playlistID }
     private var isPlaying: Bool { isCurrent && player.isPlaying }
@@ -198,13 +219,13 @@ struct WavePlaybackRow: View {
                 player.toggle(playlistID: playlistID, urls: urls, peak: model.peak)
             } label: {
                 Image(systemName: isPlaying ? "pause.circle.fill" : "play.circle.fill")
-                    .font(.title)
+                    .font(compact ? .title3 : .title2)
             }
             .buttonStyle(.borderless)
             .disabled(disabled || model == nil)
             .accessibilityLabel(isPlaying ? "暂停" : "播放")
 
-            WaveformView(model: model, progress: progress) { fraction in
+            WaveformView(model: model, progress: progress, height: compact ? 24 : 32) { fraction in
                 guard !disabled, let model else { return }
                 let target = model.location(atFraction: fraction)
                 player.seek(
@@ -215,6 +236,13 @@ struct WavePlaybackRow: View {
                     offset: target.offset
                 )
             }
+
+            Text(timeText)
+                .font(.caption2.monospacedDigit())
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+                .frame(width: 62, alignment: .trailing)
         }
         .task(id: clips.map(\.id)) {
             let currentClips = clips

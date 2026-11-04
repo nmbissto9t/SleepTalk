@@ -196,6 +196,16 @@ enum Format {
     }()
 
     static func clock(_ date: Date) -> String { clockFormatter.string(from: date) }
+
+    static func clockRange(_ start: Date, _ end: Date) -> String {
+        "\(clock(start))–\(clock(end))"
+    }
+
+    /// 播放进度，例如 0:12。
+    static func playback(_ seconds: TimeInterval) -> String {
+        let total = max(0, Int(seconds.rounded()))
+        return "\(total / 60):" + String(format: "%02d", total % 60)
+    }
     static func shortClock(_ date: Date) -> String { shortClockFormatter.string(from: date) }
     static func day(_ date: Date) -> String { dayFormatter.string(from: date) }
 

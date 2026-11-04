@@ -95,8 +95,13 @@ struct SessionDetailView: View {
                     case .snoreGroup(let clips):
                         groupRow(clips)
                         if expandedGroups.contains(clips[0].id) {
-                            ForEach(clips) { clip in
-                                clipRow(clip)
+                            let groupPlaylist = WavePlaybackRow.playlistID(for: clips)
+                            ForEach(Array(clips.enumerated()), id: \.element.id) { index, clip in
+                                clipRow(
+                                    clip,
+                                    nested: true,
+                                    isCurrent: player.playlistID == groupPlaylist && player.clipIndex == index
+                                )
                             }
                         }
                     }
@@ -126,16 +131,14 @@ struct SessionDetailView: View {
         let groupID = first.id
         let isExpanded = expandedGroups.contains(groupID)
 
-        return VStack(alignment: .leading, spacing: 8) {
-            HStack {
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .center) {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("\(Format.shortClock(first.startedAt))–\(Format.shortClock(end))")
-                        .font(.body.monospacedDigit())
-                    Label("鼾声 · \(clips.count) 段 · 共 \(Format.duration(total))", systemImage: ClipKind.snore.icon)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    Text(Format.clockRange(first.startedAt, end))
+                        .font(.subheadline.monospacedDigit())
+                    kindLine(kind: .snore, text: "鼾声 · \(clips.count) 段 · 共 \(Format.duration(total))")
                 }
-                Spacer()
+                Spacer(minLength: 8)
                 Button {
                     if isExpanded {
                         expandedGroups.remove(groupID)
@@ -143,15 +146,15 @@ struct SessionDetailView: View {
                         expandedGroups.insert(groupID)
                     }
                 } label: {
-                    Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
-                        .foregroundStyle(.secondary)
+                    Label(isExpanded ? "收起" : "展开", systemImage: isExpanded ? "chevron.up" : "chevron.down")
+                        .font(.caption)
                 }
-                .buttonStyle(.borderless)
-                .accessibilityLabel(isExpanded ? "收起这组片段" : "展开这组片段")
+                .buttonStyle(.bordered)
+                .controlSize(.small)
             }
             WavePlaybackRow(clips: clips, sessionID: sessionID, disabled: monitor.isActive, player: player)
         }
-        .padding(.vertical, 2)
+        .padding(.vertical, 1)
         .swipeActions(edge: .trailing, allowsFullSwipe: false) {
             Button(role: .destructive) {
                 player.stop()
@@ -162,23 +165,54 @@ struct SessionDetailView: View {
         }
     }
 
-    private func clipRow(_ clip: Clip) -> some View {
-        let url = Storage.clipURL(sessionID: sessionID, fileName: clip.fileName)
+    /// 图标和文字贴在一起的小标题行。
+    private func kindLine(kind: ClipKind, text: String) -> some View {
+        HStack(spacing: 4) {
+            Image(systemName: kind.icon)
+            Text(text)
+        }
+        .font(.caption)
+        .foregroundStyle(.secondary)
+    }
 
-        return VStack(alignment: .leading, spacing: 8) {
-            HStack {
+    private func detailText(for clip: Clip, includeKind: Bool) -> String {
+        var parts: [String] = []
+        if includeKind { parts.append(clip.kind.title) }
+        parts.append(Format.duration(clip.duration))
+        // “其他”不是模型的判断结果，显示可信度没有意义。
+        if clip.kind != .other, clip.confidence > 0 {
+            parts.append("可信度 \(Int(clip.confidence * 100))%")
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    /// nested 表示展开后位于鼾声分组内；isCurrent 表示分组正播放到这一段。
+    private func clipRow(_ clip: Clip, nested: Bool = false, isCurrent: Bool = false) -> some View {
+        let url = Storage.clipURL(sessionID: sessionID, fileName: clip.fileName)
+        let end = clip.startedAt.addingTimeInterval(clip.duration)
+
+        return VStack(alignment: .leading, spacing: nested ? 2 : 6) {
+            HStack(alignment: .center) {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(Format.clock(clip.startedAt)).font(.body.monospacedDigit())
-                    HStack(spacing: 6) {
-                        Label(clip.kind.title, systemImage: clip.kind.icon)
-                        Text("· \(Format.duration(clip.duration))")
-                        Text("· \(clip.topLabel) \(Int(clip.confidence * 100))%")
-                            .foregroundStyle(.tertiary)
+                    HStack(spacing: 4) {
+                        if isCurrent {
+                            Image(systemName: "speaker.wave.2.fill")
+                                .font(.caption2)
+                                .accessibilityLabel("正在播放这一段")
+                        }
+                        Text(Format.clockRange(clip.startedAt, end))
+                            .font((nested ? Font.caption : Font.subheadline).monospacedDigit())
                     }
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(isCurrent ? Color.indigo : Color.primary)
+                    if nested {
+                        Text(detailText(for: clip, includeKind: false))
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        kindLine(kind: clip.kind, text: detailText(for: clip, includeKind: true))
+                    }
                 }
-                Spacer()
+                Spacer(minLength: 8)
                 Button {
                     store.toggleFavorite(clip: clip, in: sessionID)
                 } label: {
@@ -188,9 +222,17 @@ struct SessionDetailView: View {
                 .buttonStyle(.borderless)
                 .accessibilityLabel(clip.favorite ? "取消收藏" : "收藏")
             }
-            WavePlaybackRow(clips: [clip], sessionID: sessionID, disabled: monitor.isActive, player: player)
+            WavePlaybackRow(
+                clips: [clip],
+                sessionID: sessionID,
+                disabled: monitor.isActive,
+                compact: nested,
+                player: player
+            )
         }
-        .padding(.vertical, 2)
+        .padding(.vertical, 1)
+        .listRowInsets(nested ? EdgeInsets(top: 6, leading: 36, bottom: 6, trailing: 16) : nil)
+        .listRowBackground(nested ? Color.indigo.opacity(0.14) : nil)
         .swipeActions(edge: .trailing) {
             Button(role: .destructive) {
                 player.stop()
