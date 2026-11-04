@@ -75,11 +75,6 @@ struct HomeView: View {
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                     }
-                    if let stopAt = monitor.autoStopAt {
-                        Text("将在 \(Format.shortClock(stopAt)) 自动结束")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                    }
                 }
             }
 
@@ -176,8 +171,6 @@ struct SettingsView: View {
     @AppStorage(SettingsKey.triggerDB) private var triggerDB = 12.0
     @AppStorage(SettingsKey.keepSnore) private var keepSnore = false
     @AppStorage(SettingsKey.keepAll) private var keepAll = false
-    @AppStorage(SettingsKey.autoStopEnabled) private var autoStopEnabled = true
-    @AppStorage(SettingsKey.autoStopMinutes) private var autoStopMinutes = 480
     @AppStorage(SettingsKey.startDelayMinutes) private var startDelayMinutes = 15
     @AppStorage(SettingsKey.amplifyPlayback) private var amplifyPlayback = true
     @AppStorage(SettingsKey.autoCleanSnore) private var autoCleanSnore = false
@@ -189,23 +182,6 @@ struct SettingsView: View {
         LabeledContent(title, value: StorageUsage.text(bytes))
     }
 
-    private var autoStopTime: Binding<Date> {
-        Binding(
-            get: {
-                Calendar.current.date(
-                    bySettingHour: autoStopMinutes / 60,
-                    minute: autoStopMinutes % 60,
-                    second: 0,
-                    of: Date()
-                ) ?? Date()
-            },
-            set: { newValue in
-                let parts = Calendar.current.dateComponents([.hour, .minute], from: newValue)
-                autoStopMinutes = (parts.hour ?? 8) * 60 + (parts.minute ?? 0)
-            }
-        )
-    }
-
     var body: some View {
         NavigationStack {
             Form {
@@ -213,12 +189,8 @@ struct SettingsView: View {
                     Stepper(value: $startDelayMinutes, in: 0...240) {
                         Text(startDelayMinutes == 0 ? "延迟开始：不延迟" : "延迟开始：\(startDelayMinutes) 分钟")
                     }
-                    Toggle("定时结束", isOn: $autoStopEnabled)
-                    if autoStopEnabled {
-                        DatePicker("结束时间", selection: autoStopTime, displayedComponents: .hourAndMinute)
-                    }
                 } header: {
-                    Text("监听时段")
+                    Text("开始监听")
                 } footer: {
                     Text("延迟期间麦克风会保持开启以防 App 被系统挂起，但不保存声音。长按加减号可以快速调整。修改后从下一次监听开始生效。")
                 }

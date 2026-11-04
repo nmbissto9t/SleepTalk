@@ -151,8 +151,6 @@ enum SettingsKey {
     static let triggerDB = "triggerDB"
     static let keepSnore = "keepSnore"
     static let keepAll = "keepAll"
-    static let autoStopEnabled = "autoStopEnabled"
-    static let autoStopMinutes = "autoStopMinutes"
     static let startDelayMinutes = "startDelayMinutes"
     static let amplifyPlayback = "amplifyPlayback"
     static let autoCleanSnore = "autoCleanSnore"
@@ -163,8 +161,6 @@ enum SettingsKey {
             triggerDB: 12.0,
             keepSnore: false,
             keepAll: false,
-            autoStopEnabled: true,
-            autoStopMinutes: 480,
             startDelayMinutes: 15,
             amplifyPlayback: true,
             autoCleanSnore: false,

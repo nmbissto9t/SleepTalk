@@ -56,7 +56,6 @@ final class MonitorEngine: ObservableObject {
     @Published private(set) var discardedCount = 0
     @Published private(set) var startedAt: Date?
     @Published private(set) var activeSessionID: UUID?
-    @Published private(set) var autoStopAt: Date?
 
     var isActive: Bool { activeSessionID != nil }
 
@@ -90,7 +89,6 @@ final class MonitorEngine: ObservableObject {
     /// 延迟开始结束后才为 true；此前麦克风保持运行以免被系统挂起，但不录制片段。
     private var armed = false
     private var armedAt = Date.distantPast
-    private var autoStopDate: Date?
     private var coverageOpen = false
 
     private var triggerDB: Float = 12
@@ -166,7 +164,6 @@ final class MonitorEngine: ObservableObject {
             inOutage = false
             armed = false
             armedAt = newSession.startedAt
-            autoStopDate = nil
             coverageOpen = false
             heartbeatTick = 0
             try startAudio()
@@ -200,27 +197,10 @@ final class MonitorEngine: ObservableObject {
         session?.startedAt = now
         log("开始记录")
         markCoverage(now)
-        autoStopDate = Self.nextAutoStop(after: now)
-        if let stopAt = autoStopDate {
-            log("将在 \(Format.shortClock(stopAt)) 自动结束")
-        }
         saveSession()
-        let stopAt = autoStopDate
         DispatchQueue.main.async {
             self.startedAt = now
-            self.autoStopAt = stopAt
         }
-    }
-
-    private static func nextAutoStop(after date: Date) -> Date? {
-        let defaults = UserDefaults.standard
-        guard defaults.bool(forKey: SettingsKey.autoStopEnabled) else { return nil }
-        let minutes = defaults.integer(forKey: SettingsKey.autoStopMinutes)
-        return Calendar.current.nextDate(
-            after: date,
-            matching: DateComponents(hour: minutes / 60, minute: minutes % 60),
-            matchingPolicy: .nextTime
-        )
     }
 
     private func endSession(battery: String) {
@@ -244,7 +224,6 @@ final class MonitorEngine: ObservableObject {
                 Storage.delete(sessionID: id)
             }
             self.session = nil
-            self.autoStopDate = nil
             self.coverageOpen = false
             self.armed = false
             self.currentStatus = .stopped
@@ -252,7 +231,6 @@ final class MonitorEngine: ObservableObject {
                 self.status = .stopped
                 self.activeSessionID = nil
                 self.startedAt = nil
-                self.autoStopAt = nil
                 self.onSessionEnded?()
             }
         }
@@ -420,15 +398,6 @@ final class MonitorEngine: ObservableObject {
         guard wanted else { return }
         loadSettings()
         let now = Date()
-        if let stopAt = autoStopDate, now >= stopAt {
-            autoStopDate = nil
-            log("到达设定时间，自动结束")
-            DispatchQueue.main.async {
-                let battery = Self.batteryDescription()
-                self.queue.async { self.endSession(battery: battery) }
-            }
-            return
-        }
         let alive = engine.isRunning && now.timeIntervalSince(lastBufferAt) < Tuning.stallSeconds
         if alive {
             markCoverage(now)
