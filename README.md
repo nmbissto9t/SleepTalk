@@ -17,6 +17,13 @@
 2. 手机插电，放在枕边一两米内，点“开始监听”，然后锁屏。不要从后台划掉 App。
 3. 早上点“结束监听”，看“实际监听”覆盖率、未监听时段和运行日志。
 
+## 设置项
+
+- 延迟开始：默认 15 分钟，可改为 0–240 分钟。期间麦克风开启但不保存声音。
+- 定时结束：默认开启，08:00 自动结束。
+- 放大回放音量：默认开启，只影响回放，不改变保存的文件。
+- 自动清理鼾声：默认关闭，开启后删除超过保留天数且未收藏的鼾声。
+
 ## 调参
 
 阈值集中在 `Sources/MonitorEngine.swift` 的 `Tuning` 里。灵敏度可以直接在 App 设置中调整。
@@ -26,4 +33,5 @@
 - `MonitorEngine.swift`：音频引擎、底噪跟踪、片段录制、声音分类、打断恢复、心跳
 - `Storage.swift`：每晚一个文件夹，保存 `session.json` 和 `.m4a`
 - `HomeView.swift` / `SessionDetailView.swift`：界面
+- `Waveform.swift` / `ClipPlayer.swift`：波形和回放
 - `.github/workflows/build.yml`：云端编译并打包成 `.tipa`

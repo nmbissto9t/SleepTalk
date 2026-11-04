@@ -47,7 +47,7 @@ struct HomeView: View {
                     .accessibilityLabel("设置")
                 }
             }
-            .sheet(isPresented: $showSettings) {
+            .sheet(isPresented: $showSettings, onDismiss: { store.cleanIfNeeded() }) {
                 SettingsView()
             }
             .confirmationDialog("结束今晚的监听？", isPresented: $confirmStop, titleVisibility: .visible) {
@@ -55,6 +55,11 @@ struct HomeView: View {
                 Button("继续监听", role: .cancel) {}
             }
         }
+    }
+
+    private var isDelayed: Bool {
+        if case .delayed = monitor.status { return true }
+        return false
     }
 
     private var monitorCard: some View {
@@ -70,7 +75,23 @@ struct HomeView: View {
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                     }
+                    if let stopAt = monitor.autoStopAt {
+                        Text("将在 \(Format.shortClock(stopAt)) 自动结束")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
                 }
+            }
+
+            if case .delayed(let until) = monitor.status {
+                HStack {
+                    Text("距离开始还有")
+                    Text(until, style: .timer).monospacedDigit()
+                    Spacer()
+                    Button("立即开始") { monitor.skipDelay() }
+                        .buttonStyle(.bordered)
+                }
+                .font(.subheadline)
             }
 
             if monitor.isActive {
@@ -87,7 +108,7 @@ struct HomeView: View {
                     monitor.start()
                 }
             } label: {
-                Text(monitor.isActive ? "结束监听" : "开始监听")
+                Text(monitor.isActive ? (isDelayed ? "取消" : "结束监听") : "开始监听")
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 6)
             }
@@ -155,10 +176,47 @@ struct SettingsView: View {
     @AppStorage(SettingsKey.triggerDB) private var triggerDB = 12.0
     @AppStorage(SettingsKey.keepSnore) private var keepSnore = false
     @AppStorage(SettingsKey.keepAll) private var keepAll = false
+    @AppStorage(SettingsKey.autoStopEnabled) private var autoStopEnabled = true
+    @AppStorage(SettingsKey.autoStopMinutes) private var autoStopMinutes = 480
+    @AppStorage(SettingsKey.startDelayMinutes) private var startDelayMinutes = 15
+    @AppStorage(SettingsKey.amplifyPlayback) private var amplifyPlayback = true
+    @AppStorage(SettingsKey.autoCleanSnore) private var autoCleanSnore = false
+    @AppStorage(SettingsKey.snoreRetentionDays) private var snoreRetentionDays = 30
+
+    private var autoStopTime: Binding<Date> {
+        Binding(
+            get: {
+                Calendar.current.date(
+                    bySettingHour: autoStopMinutes / 60,
+                    minute: autoStopMinutes % 60,
+                    second: 0,
+                    of: Date()
+                ) ?? Date()
+            },
+            set: { newValue in
+                let parts = Calendar.current.dateComponents([.hour, .minute], from: newValue)
+                autoStopMinutes = (parts.hour ?? 8) * 60 + (parts.minute ?? 0)
+            }
+        )
+    }
 
     var body: some View {
         NavigationStack {
             Form {
+                Section {
+                    Stepper(value: $startDelayMinutes, in: 0...240) {
+                        Text(startDelayMinutes == 0 ? "延迟开始：不延迟" : "延迟开始：\(startDelayMinutes) 分钟")
+                    }
+                    Toggle("定时结束", isOn: $autoStopEnabled)
+                    if autoStopEnabled {
+                        DatePicker("结束时间", selection: autoStopTime, displayedComponents: .hourAndMinute)
+                    }
+                } header: {
+                    Text("监听时段")
+                } footer: {
+                    Text("延迟期间麦克风会保持开启以防 App 被系统挂起，但不保存声音。长按加减号可以快速调整。修改后从下一次监听开始生效。")
+                }
+
                 Section {
                     VStack(alignment: .leading) {
                         Text("高于底噪 \(Int(triggerDB)) dB 时开始判断")
@@ -177,6 +235,27 @@ struct SettingsView: View {
                     Text("保留范围")
                 } footer: {
                     Text("第一晚建议打开“保留所有片段”，早上听一遍就能知道有没有被误判而丢掉的梦话。平时关闭以节省空间。")
+                }
+
+                Section {
+                    Toggle("放大回放音量", isOn: $amplifyPlayback)
+                } header: {
+                    Text("回放")
+                } footer: {
+                    Text("只影响回放，不影响录音、分类和保存的文件。背景噪声也会一起变大，觉得太吵可以关闭。")
+                }
+
+                Section {
+                    Toggle("自动清理鼾声", isOn: $autoCleanSnore)
+                    if autoCleanSnore {
+                        Stepper(value: $snoreRetentionDays, in: 1...365) {
+                            Text("保留 \(snoreRetentionDays) 天")
+                        }
+                    }
+                } header: {
+                    Text("存储")
+                } footer: {
+                    Text("只删除过期且未收藏的鼾声，不会删除梦话和其他片段。删除后无法恢复。")
                 }
 
                 Section("隐私") {

@@ -13,6 +13,7 @@ final class MonitorEngine: ObservableObject {
         case stopped
         case starting
         case calibrating
+        case delayed(until: Date)
         case listening
         case capturing
         case interrupted
@@ -23,6 +24,7 @@ final class MonitorEngine: ObservableObject {
             case .stopped: return "未开始"
             case .starting: return "正在启动…"
             case .calibrating: return "正在适应房间底噪…"
+            case .delayed: return "延迟开始中，暂不录音"
             case .listening: return "监听中"
             case .capturing: return "正在录制片段"
             case .interrupted: return "被打断，等待恢复"
@@ -54,6 +56,7 @@ final class MonitorEngine: ObservableObject {
     @Published private(set) var discardedCount = 0
     @Published private(set) var startedAt: Date?
     @Published private(set) var activeSessionID: UUID?
+    @Published private(set) var autoStopAt: Date?
 
     var isActive: Bool { activeSessionID != nil }
 
@@ -83,6 +86,12 @@ final class MonitorEngine: ObservableObject {
 
     private var restartPending = false
     private var inOutage = false
+
+    /// 延迟开始结束后才为 true；此前麦克风保持运行以免被系统挂起，但不录制片段。
+    private var armed = false
+    private var armedAt = Date.distantPast
+    private var autoStopDate: Date?
+    private var coverageOpen = false
 
     private var triggerDB: Float = 12
     private var keepSnore = false
@@ -120,6 +129,14 @@ final class MonitorEngine: ObservableObject {
         queue.async { self.endSession(battery: battery) }
     }
 
+    /// 跳过剩余的延迟时间，立即开始记录。
+    func skipDelay() {
+        queue.async {
+            guard self.wanted, !self.armed else { return }
+            self.armedAt = Date()
+        }
+    }
+
     func setForeground(_ foreground: Bool) {
         queue.async { self.isForeground = foreground }
     }
@@ -136,23 +153,33 @@ final class MonitorEngine: ObservableObject {
 
     private func beginSession(battery: String) {
         loadSettings()
-        var newSession = Session(startedAt: Date())
+        let now = Date()
+        let storedDelay = UserDefaults.standard.integer(forKey: SettingsKey.startDelayMinutes)
+        let delayMinutes = max(0, min(240, storedDelay))
+        var newSession = Session(startedAt: now.addingTimeInterval(Double(delayMinutes) * 60))
         do {
             _ = try Storage.ensureFolder(for: newSession.id)
-            newSession.events.append(LogEvent(date: Date(), message: "开始监听，\(battery)"))
+            newSession.events.append(LogEvent(date: now, message: "启动监听，\(battery)"))
             session = newSession
             wanted = true
             noiseFloor = nil
             inOutage = false
+            armed = false
+            armedAt = newSession.startedAt
+            autoStopDate = nil
+            coverageOpen = false
+            heartbeatTick = 0
             try startAudio()
-            markCoverage(Date())
+            if delayMinutes == 0 {
+                arm(at: now)
+            } else {
+                log("延迟 \(delayMinutes) 分钟后开始记录，期间不保存声音")
+            }
             startHeartbeat()
             saveSession()
             let id = newSession.id
-            let started = newSession.startedAt
             DispatchQueue.main.async {
                 self.activeSessionID = id
-                self.startedAt = started
                 self.savedClipCount = 0
                 self.discardedCount = 0
             }
@@ -165,7 +192,39 @@ final class MonitorEngine: ObservableObject {
         }
     }
 
+    private func arm(at now: Date) {
+        armed = true
+        ring.removeAll()
+        ringSeconds = 0
+        loudSeconds = 0
+        session?.startedAt = now
+        log("开始记录")
+        markCoverage(now)
+        autoStopDate = Self.nextAutoStop(after: now)
+        if let stopAt = autoStopDate {
+            log("将在 \(Format.shortClock(stopAt)) 自动结束")
+        }
+        saveSession()
+        let stopAt = autoStopDate
+        DispatchQueue.main.async {
+            self.startedAt = now
+            self.autoStopAt = stopAt
+        }
+    }
+
+    private static func nextAutoStop(after date: Date) -> Date? {
+        let defaults = UserDefaults.standard
+        guard defaults.bool(forKey: SettingsKey.autoStopEnabled) else { return nil }
+        let minutes = defaults.integer(forKey: SettingsKey.autoStopMinutes)
+        return Calendar.current.nextDate(
+            after: date,
+            matching: DateComponents(hour: minutes / 60, minute: minutes % 60),
+            matchingPolicy: .nextTime
+        )
+    }
+
     private func endSession(battery: String) {
+        guard wanted else { return }
         wanted = false
         if capture != nil { finishCapture() }
         // finishCapture 把收尾排在队列里，这里排在它之后执行。
@@ -175,15 +234,25 @@ final class MonitorEngine: ObservableObject {
             self.stopAudio()
             try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
             let now = Date()
-            self.markCoverage(now)
-            self.log("结束监听，\(battery)")
-            self.session?.endedAt = now
-            self.saveSession()
+            if self.armed {
+                if self.coverageOpen { self.markCoverage(now) }
+                self.log("结束监听，\(battery)")
+                self.session?.endedAt = now
+                self.saveSession()
+            } else if let id = self.session?.id {
+                // 延迟期间就结束了：没有任何内容，不留空记录。
+                Storage.delete(sessionID: id)
+            }
             self.session = nil
+            self.autoStopDate = nil
+            self.coverageOpen = false
+            self.armed = false
+            self.currentStatus = .stopped
             DispatchQueue.main.async {
                 self.status = .stopped
                 self.activeSessionID = nil
                 self.startedAt = nil
+                self.autoStopAt = nil
                 self.onSessionEnded?()
             }
         }
@@ -245,6 +314,7 @@ final class MonitorEngine: ObservableObject {
     private func restartAudio() {
         guard wanted else { return }
         if capture != nil { finishCapture() }
+        closeCoverage()
         stopAudio()
         do {
             try startAudio()
@@ -304,6 +374,7 @@ final class MonitorEngine: ObservableObject {
         case .began:
             log("被系统打断（来电、闹钟或其他音频）")
             inOutage = true
+            closeCoverage()
             if capture != nil { finishCapture() }
             publish(status: .interrupted)
             saveSession()
@@ -327,6 +398,7 @@ final class MonitorEngine: ObservableObject {
         guard wanted else { return }
         log("系统音频服务重置，重建音频引擎")
         inOutage = true
+        closeCoverage()
         if capture != nil { finishCapture() }
         engine = AVAudioEngine()
         scheduleRestart(after: 1)
@@ -348,6 +420,15 @@ final class MonitorEngine: ObservableObject {
         guard wanted else { return }
         loadSettings()
         let now = Date()
+        if let stopAt = autoStopDate, now >= stopAt {
+            autoStopDate = nil
+            log("到达设定时间，自动结束")
+            DispatchQueue.main.async {
+                let battery = Self.batteryDescription()
+                self.queue.async { self.endSession(battery: battery) }
+            }
+            return
+        }
         let alive = engine.isRunning && now.timeIntervalSince(lastBufferAt) < Tuning.stallSeconds
         if alive {
             markCoverage(now)
@@ -356,6 +437,7 @@ final class MonitorEngine: ObservableObject {
                 log("麦克风没有数据，尝试恢复")
                 inOutage = true
             }
+            closeCoverage()
             scheduleRestart(after: 0)
         }
         heartbeatTick += 1
@@ -363,19 +445,30 @@ final class MonitorEngine: ObservableObject {
     }
 
     private func markCoverage(_ now: Date) {
-        guard var current = session else { return }
-        if var last = current.coverage.last, now.timeIntervalSince(last.end) <= Tuning.coverageJoinSeconds {
+        guard armed, var current = session else { return }
+        if coverageOpen, var last = current.coverage.last,
+           now.timeIntervalSince(last.end) <= Tuning.coverageJoinSeconds {
             last.end = now
             current.coverage[current.coverage.count - 1] = last
         } else {
-            if let last = current.coverage.last {
+            if let last = current.coverage.last, now.timeIntervalSince(last.end) >= 5 {
                 current.events.append(LogEvent(
                     date: now,
                     message: "发现未监听空档：\(Format.clock(last.end)) – \(Format.clock(now))"
                 ))
             }
             current.coverage.append(CoverageRange(start: now, end: now))
+            coverageOpen = true
         }
+        session = current
+    }
+
+    /// 监听中断时调用：覆盖范围只算到最后一次真正收到麦克风数据的时刻。
+    private func closeCoverage() {
+        guard coverageOpen, var current = session, var last = current.coverage.last else { return }
+        coverageOpen = false
+        last.end = max(last.start, max(last.end, lastBufferAt))
+        current.coverage[current.coverage.count - 1] = last
         session = current
     }
 
@@ -422,6 +515,16 @@ final class MonitorEngine: ObservableObject {
         if now < calibrateUntil {
             noiseFloor = max(Tuning.minimumFloorDB, floorValue + (db - floorValue) * 0.2)
             return
+        }
+
+        if !armed {
+            if now >= armedAt {
+                arm(at: now)
+            } else {
+                let delayed = Status.delayed(until: armedAt)
+                if currentStatus != delayed { publish(status: delayed) }
+                return
+            }
         }
 
         if currentStatus != .listening { publish(status: .listening) }

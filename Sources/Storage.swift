@@ -114,6 +114,40 @@ final class SessionStore: ObservableObject {
         reload()
     }
 
+    /// 删除一组片段中未收藏的部分。
+    func deleteUnfavorited(clips: [Clip], from sessionID: UUID) {
+        guard var session = session(id: sessionID) else { return }
+        let targets = clips.filter { !$0.favorite }
+        let ids = Set(targets.map(\.id))
+        session.clips.removeAll { ids.contains($0.id) }
+        for clip in targets {
+            try? FileManager.default.removeItem(at: Storage.clipURL(sessionID: sessionID, fileName: clip.fileName))
+        }
+        try? Storage.save(session)
+        reload()
+    }
+
+    /// 开关打开时，删除超过保留天数且未收藏的鼾声。不会动梦话、其他片段和进行中的记录。
+    func cleanIfNeeded() {
+        let defaults = UserDefaults.standard
+        guard defaults.bool(forKey: SettingsKey.autoCleanSnore) else { return }
+        let days = max(1, defaults.integer(forKey: SettingsKey.snoreRetentionDays))
+        let cutoff = Date().addingTimeInterval(-Double(days) * 86_400)
+        var changed = false
+        for var session in Storage.loadAll() where session.endedAt != nil {
+            let expired = session.clips.filter { $0.kind == .snore && !$0.favorite && $0.startedAt < cutoff }
+            guard !expired.isEmpty else { continue }
+            let ids = Set(expired.map(\.id))
+            session.clips.removeAll { ids.contains($0.id) }
+            for clip in expired {
+                try? FileManager.default.removeItem(at: Storage.clipURL(sessionID: session.id, fileName: clip.fileName))
+            }
+            try? Storage.save(session)
+            changed = true
+        }
+        if changed { reload() }
+    }
+
     func toggleFavorite(clip: Clip, in sessionID: UUID) {
         guard var session = session(id: sessionID),
               let index = session.clips.firstIndex(where: { $0.id == clip.id }) else { return }
@@ -125,6 +159,11 @@ final class SessionStore: ObservableObject {
     /// App 启动时还没有结束标记的记录，说明上次监听被系统或手动杀掉了。
     private func recoverUnfinishedSessions() {
         for var session in Storage.loadAll() where session.endedAt == nil {
+            // 延迟开始期间被杀掉：没有任何内容，不留空记录。
+            if session.coverage.isEmpty && session.clips.isEmpty {
+                Storage.delete(sessionID: session.id)
+                continue
+            }
             let end = session.coverage.last?.end ?? session.startedAt
             session.endedAt = end
             session.endedAbnormally = true
