@@ -54,6 +54,15 @@ jobs:
           name: SleepTalk-tipa
           path: SleepTalk.tipa
 
+      - name: Publish test download link
+        if: github.ref != 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view test >/dev/null 2>&1 || \
+            gh release create test --prerelease --target "$GITHUB_SHA" --title "测试版" --notes "测试分支的最新编译结果。用手机下载 SleepTalk.tipa，再用 TrollStore 打开安装。"
+          gh release upload test SleepTalk.tipa --clobber
+
       - name: Publish download link
         if: github.ref == 'refs/heads/main'
         env:
