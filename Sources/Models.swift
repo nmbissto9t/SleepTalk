@@ -201,6 +201,12 @@ enum Format {
         "\(clock(start))–\(clock(end))"
     }
 
+    /// 显示用的结束时间。开始时间按整秒显示、时长四舍五入，这样两者相减和显示的时长一致。
+    static func displayEnd(start: Date, duration: TimeInterval) -> Date {
+        let wholeSecond = Date(timeIntervalSince1970: start.timeIntervalSince1970.rounded(.down))
+        return wholeSecond.addingTimeInterval(duration.rounded())
+    }
+
     /// 播放进度，例如 0:12。
     static func playback(_ seconds: TimeInterval) -> String {
         let total = max(0, Int(seconds.rounded()))

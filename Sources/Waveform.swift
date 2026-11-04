@@ -102,15 +102,6 @@ struct WaveformModel: Equatable {
         }
     }
 
-    var totalDuration: TimeInterval {
-        durations.reduce(0, +)
-    }
-
-    func elapsed(clipIndex: Int, offset: TimeInterval) -> TimeInterval {
-        guard durations.indices.contains(clipIndex) else { return 0 }
-        return durations[..<clipIndex].reduce(0, +) + min(max(0, offset), durations[clipIndex])
-    }
-
     func barPosition(clipIndex: Int, offset: TimeInterval) -> Double {
         guard clipStarts.indices.contains(clipIndex) else { return 0 }
         let duration = max(0.001, durations[clipIndex])
@@ -192,14 +183,6 @@ struct WavePlaybackRow: View {
     }
 
     private var playlistID: String { Self.playlistID(for: clips) }
-
-    private var timeText: String {
-        guard let model else { return "" }
-        let total = Format.playback(model.totalDuration)
-        guard isCurrent else { return total }
-        let elapsed = model.elapsed(clipIndex: player.clipIndex, offset: player.clipOffset)
-        return "\(Format.playback(elapsed)) / \(total)"
-    }
     private var isCurrent: Bool { player.playlistID == playlistID }
     private var isPlaying: Bool { isCurrent && player.isPlaying }
 
@@ -236,13 +219,6 @@ struct WavePlaybackRow: View {
                     offset: target.offset
                 )
             }
-
-            Text(timeText)
-                .font(.caption2.monospacedDigit())
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .minimumScaleFactor(0.8)
-                .frame(width: 62, alignment: .trailing)
         }
         .task(id: clips.map(\.id)) {
             let currentClips = clips

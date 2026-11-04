@@ -126,8 +126,9 @@ struct SessionDetailView: View {
     private func groupRow(_ clips: [Clip]) -> some View {
         let first = clips[0]
         let last = clips[clips.count - 1]
-        let end = last.startedAt.addingTimeInterval(last.duration)
+        let end = Format.displayEnd(start: last.startedAt, duration: last.duration)
         let total = clips.reduce(0) { $0 + $1.duration }
+        let timeInfo = progressText(for: clips) ?? "共 \(Format.duration(total))"
         let groupID = first.id
         let isExpanded = expandedGroups.contains(groupID)
 
@@ -136,7 +137,7 @@ struct SessionDetailView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(Format.clockRange(first.startedAt, end))
                         .font(.subheadline.monospacedDigit())
-                    kindLine(kind: .snore, text: "鼾声 · \(clips.count) 段 · 共 \(Format.duration(total))")
+                    kindLine(kind: .snore, text: "鼾声 · \(clips.count) 段 · \(timeInfo)")
                 }
                 Spacer(minLength: 8)
                 Button {
@@ -146,8 +147,11 @@ struct SessionDetailView: View {
                         expandedGroups.insert(groupID)
                     }
                 } label: {
-                    Label(isExpanded ? "收起" : "展开", systemImage: isExpanded ? "chevron.up" : "chevron.down")
-                        .font(.caption)
+                    HStack(spacing: 4) {
+                        Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                        Text(isExpanded ? "收起" : "展开")
+                    }
+                    .font(.caption)
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
@@ -165,6 +169,17 @@ struct SessionDetailView: View {
         }
     }
 
+    /// 这个片段或分组正在播放时返回“已播放 / 总时长”，否则返回 nil。
+    private func progressText(for clips: [Clip]) -> String? {
+        guard player.playlistID == WavePlaybackRow.playlistID(for: clips),
+              clips.indices.contains(player.clipIndex) else { return nil }
+        let index = player.clipIndex
+        let before: TimeInterval = clips[..<index].reduce(0) { $0 + $1.duration }
+        let total: TimeInterval = clips.reduce(0) { $0 + $1.duration }
+        let elapsed = before + min(max(0, player.clipOffset), clips[index].duration)
+        return "\(Format.playback(elapsed)) / \(Format.playback(total))"
+    }
+
     /// 图标和文字贴在一起的小标题行。
     private func kindLine(kind: ClipKind, text: String) -> some View {
         HStack(spacing: 4) {
@@ -178,7 +193,7 @@ struct SessionDetailView: View {
     private func detailText(for clip: Clip, includeKind: Bool) -> String {
         var parts: [String] = []
         if includeKind { parts.append(clip.kind.title) }
-        parts.append(Format.duration(clip.duration))
+        parts.append(progressText(for: [clip]) ?? Format.duration(clip.duration))
         // “其他”不是模型的判断结果，显示可信度没有意义。
         if clip.kind != .other, clip.confidence > 0 {
             parts.append("可信度 \(Int(clip.confidence * 100))%")
@@ -189,7 +204,7 @@ struct SessionDetailView: View {
     /// nested 表示展开后位于鼾声分组内；isCurrent 表示分组正播放到这一段。
     private func clipRow(_ clip: Clip, nested: Bool = false, isCurrent: Bool = false) -> some View {
         let url = Storage.clipURL(sessionID: sessionID, fileName: clip.fileName)
-        let end = clip.startedAt.addingTimeInterval(clip.duration)
+        let end = Format.displayEnd(start: clip.startedAt, duration: clip.duration)
 
         return VStack(alignment: .leading, spacing: nested ? 2 : 6) {
             HStack(alignment: .center) {
