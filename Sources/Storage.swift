@@ -3,7 +3,60 @@ import Combine
 
 /// 每晚一个文件夹：Documents/Sessions/<uuid>/session.json 加若干 .m4a。
 /// 使用“首次解锁后可访问”的保护级别，否则锁屏时写不进去。
+struct StorageUsage: Equatable {
+    var speech: Int64 = 0
+    var snore: Int64 = 0
+    var other: Int64 = 0
+    /// session.json、波形缓存等，以及没有登记到记录里的文件。
+    var misc: Int64 = 0
+
+    var total: Int64 { speech + snore + other + misc }
+
+    static func text(_ bytes: Int64) -> String {
+        ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+    }
+}
+
 enum Storage {
+    /// 一条记录中所有音频片段占用的字节数。
+    static func clipBytes(in session: Session) -> Int64 {
+        session.clips.reduce(0) { $0 + fileSize(clipURL(sessionID: session.id, fileName: $1.fileName)) }
+    }
+
+    /// 统计 App 保存的数据，不含 App 本身的安装体积。
+    static func usage() -> StorageUsage {
+        var result = StorageUsage()
+        for session in loadAll() {
+            for clip in session.clips {
+                let size = fileSize(clipURL(sessionID: session.id, fileName: clip.fileName))
+                switch clip.kind {
+                case .speech: result.speech += size
+                case .snore: result.snore += size
+                case .other: result.other += size
+                }
+            }
+        }
+        let everything = folderSize(root) + folderSize(WaveformLoader.cacheFolder)
+        result.misc = max(0, everything - result.speech - result.snore - result.other)
+        return result
+    }
+
+    private static func fileSize(_ url: URL) -> Int64 {
+        let values = try? url.resourceValues(forKeys: [.fileSizeKey])
+        return Int64(values?.fileSize ?? 0)
+    }
+
+    private static func folderSize(_ url: URL) -> Int64 {
+        guard let files = FileManager.default.enumerator(at: url, includingPropertiesForKeys: [.fileSizeKey]) else {
+            return 0
+        }
+        var total: Int64 = 0
+        for case let file as URL in files {
+            total += fileSize(file)
+        }
+        return total
+    }
+
     static var root: URL {
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         return docs.appendingPathComponent("Sessions", isDirectory: true)
@@ -114,6 +167,40 @@ final class SessionStore: ObservableObject {
         reload()
     }
 
+    /// 删除一组片段中未收藏的部分。
+    func deleteUnfavorited(clips: [Clip], from sessionID: UUID) {
+        guard var session = session(id: sessionID) else { return }
+        let targets = clips.filter { !$0.favorite }
+        let ids = Set(targets.map(\.id))
+        session.clips.removeAll { ids.contains($0.id) }
+        for clip in targets {
+            try? FileManager.default.removeItem(at: Storage.clipURL(sessionID: sessionID, fileName: clip.fileName))
+        }
+        try? Storage.save(session)
+        reload()
+    }
+
+    /// 开关打开时，删除超过保留天数且未收藏的鼾声。不会动梦话、其他片段和进行中的记录。
+    func cleanIfNeeded() {
+        let defaults = UserDefaults.standard
+        guard defaults.bool(forKey: SettingsKey.autoCleanSnore) else { return }
+        let days = max(1, defaults.integer(forKey: SettingsKey.snoreRetentionDays))
+        let cutoff = Date().addingTimeInterval(-Double(days) * 86_400)
+        var changed = false
+        for var session in Storage.loadAll() where session.endedAt != nil {
+            let expired = session.clips.filter { $0.kind == .snore && !$0.favorite && $0.startedAt < cutoff }
+            guard !expired.isEmpty else { continue }
+            let ids = Set(expired.map(\.id))
+            session.clips.removeAll { ids.contains($0.id) }
+            for clip in expired {
+                try? FileManager.default.removeItem(at: Storage.clipURL(sessionID: session.id, fileName: clip.fileName))
+            }
+            try? Storage.save(session)
+            changed = true
+        }
+        if changed { reload() }
+    }
+
     func toggleFavorite(clip: Clip, in sessionID: UUID) {
         guard var session = session(id: sessionID),
               let index = session.clips.firstIndex(where: { $0.id == clip.id }) else { return }
@@ -125,6 +212,11 @@ final class SessionStore: ObservableObject {
     /// App 启动时还没有结束标记的记录，说明上次监听被系统或手动杀掉了。
     private func recoverUnfinishedSessions() {
         for var session in Storage.loadAll() where session.endedAt == nil {
+            // 延迟开始期间被杀掉：没有任何内容，不留空记录。
+            if session.coverage.isEmpty && session.clips.isEmpty {
+                Storage.delete(sessionID: session.id)
+                continue
+            }
             let end = session.coverage.last?.end ?? session.startedAt
             session.endedAt = end
             session.endedAbnormally = true

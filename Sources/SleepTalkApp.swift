@@ -18,7 +18,11 @@ struct SleepTalkApp: App {
                 .preferredColorScheme(.dark)
                 .onAppear {
                     let sessionStore = store
-                    monitor.onSessionEnded = { sessionStore.reload() }
+                    monitor.onSessionEnded = {
+                        sessionStore.reload()
+                        sessionStore.cleanIfNeeded()
+                    }
+                    sessionStore.cleanIfNeeded()
                 }
         }
         .onChange(of: scenePhase) { phase in
