@@ -8,7 +8,7 @@ settings:
   base:
     SWIFT_VERSION: "5.0"
     MARKETING_VERSION: "0.3.0"
-    CURRENT_PROJECT_VERSION: "3"
+    CURRENT_PROJECT_VERSION: "4"
 targets:
   SleepTalk:
     type: application
@@ -26,8 +26,23 @@ targets:
         CODE_SIGNING_ALLOWED: "NO"
         CODE_SIGNING_REQUIRED: "NO"
         CODE_SIGN_IDENTITY: ""
+  SleepTalkTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - Tests
+    dependencies:
+      - target: SleepTalk
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: "YES"
+        PRODUCT_BUNDLE_IDENTIFIER: local.sleeptalk.tests
+        CODE_SIGNING_ALLOWED: "NO"
 schemes:
   SleepTalk:
     build:
       targets:
         SleepTalk: all
+    test:
+      targets:
+        - SleepTalkTests

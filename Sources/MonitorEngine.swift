@@ -52,8 +52,7 @@ final class MonitorEngine: ObservableObject {
     @Published private(set) var status: Status = .stopped
     @Published private(set) var levelDB: Float = -80
     @Published private(set) var floorDB: Float = -80
-    @Published private(set) var savedClipCount = 0
-    @Published private(set) var discardedCount = 0
+    @Published private(set) var speechClipCount = 0
     @Published private(set) var startedAt: Date?
     @Published private(set) var activeSessionID: UUID?
 
@@ -92,8 +91,6 @@ final class MonitorEngine: ObservableObject {
     private var coverageOpen = false
 
     private var triggerDB: Float = 12
-    private var keepSnore = false
-    private var keepAll = false
 
     init() {
         registerObservers()
@@ -177,8 +174,7 @@ final class MonitorEngine: ObservableObject {
             let id = newSession.id
             DispatchQueue.main.async {
                 self.activeSessionID = id
-                self.savedClipCount = 0
-                self.discardedCount = 0
+                self.speechClipCount = 0
             }
         } catch {
             wanted = false
@@ -512,8 +508,11 @@ final class MonitorEngine: ObservableObject {
     // MARK: - 片段录制
 
     private func beginCapture(firstLevel: Float) {
-        guard let session, let format, Storage.hasFreeSpace() else {
-            if !inOutage { log("存储空间不足，跳过录制") }
+        guard let session, let format else { return }
+        guard Storage.hasFreeSpace() else {
+            let skipped = (session.storageSkippedCount ?? 0) + 1
+            self.session?.storageSkippedCount = skipped
+            if skipped == 1 { log("存储空间不足，开始跳过录制") }
             return
         }
         let preRoll = ringSeconds
@@ -649,12 +648,8 @@ final class MonitorEngine: ObservableObject {
             noiseFloor = max(floorValue, finished.tailDB - 2)
         }
 
-        let keep = !finished.writeFailed && duration > 0 && (
-            kind == .speech
-            || (kind == .snore && keepSnore)
-            || keepAll
-            || finished.classifierFailed
-        )
+        // 先全部保留，之后由保留规则清理音频；这样模型漏判时还有机会找回。
+        let keep = !finished.writeFailed && duration > 0
 
         if keep {
             let confidence = kind == .speech ? finished.bestSpeech
@@ -667,22 +662,20 @@ final class MonitorEngine: ObservableObject {
                 kind: kind,
                 confidence: confidence,
                 topLabel: finished.topLabel,
-                peakDB: finished.peakDB
+                peakDB: finished.peakDB,
+                // 分类器失败时无法判断内容，不自动清理。
+                autoCleanable: !finished.classifierFailed
             )
             session?.clips.append(clip)
-            log("保留\(kind.title) \(Format.duration(duration))，最可能是 \(finished.topLabel)（\(Int(finished.topConfidence * 100))%）")
         } else {
             try? FileManager.default.removeItem(at: finished.url)
             session?.discardedCount += 1
-            log("丢弃片段 \(Format.duration(duration))，最可能是 \(finished.topLabel)（\(Int(finished.topConfidence * 100))%）")
         }
         saveSession()
 
-        let saved = session?.clips.count ?? 0
-        let discarded = session?.discardedCount ?? 0
+        let speech = session?.count(of: .speech) ?? 0
         DispatchQueue.main.async {
-            self.savedClipCount = saved
-            self.discardedCount = discarded
+            self.speechClipCount = speech
         }
         if wanted, capture == nil, !inOutage { publish(status: .listening) }
     }
@@ -692,8 +685,6 @@ final class MonitorEngine: ObservableObject {
     private func loadSettings() {
         let defaults = UserDefaults.standard
         triggerDB = Float(defaults.double(forKey: SettingsKey.triggerDB))
-        keepSnore = defaults.bool(forKey: SettingsKey.keepSnore)
-        keepAll = defaults.bool(forKey: SettingsKey.keepAll)
     }
 
     private func log(_ message: String) {

@@ -21,9 +21,8 @@ struct SleepTalkApp: App {
                     let sessionStore = store
                     monitor.onSessionEnded = {
                         sessionStore.reload()
-                        sessionStore.cleanIfNeeded()
                     }
-                    sessionStore.cleanIfNeeded()
+                    sessionStore.applyRetention(beforeNewSession: false)
                 }
         }
         .onChange(of: scenePhase) { phase in

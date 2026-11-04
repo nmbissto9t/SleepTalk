@@ -11,6 +11,10 @@ enum WaveformLoader {
             .appendingPathComponent("Waveforms", isDirectory: true)
     }
 
+    static func removeCache(for clip: Clip) {
+        try? FileManager.default.removeItem(at: cacheFolder.appendingPathComponent("\(clip.id.uuidString).json"))
+    }
+
     /// 每根柱子是该时间段的线性峰值（0...1 左右），尚未归一化。
     static func bars(for clip: Clip, sessionID: UUID) -> [Float] {
         let cacheURL = cacheFolder.appendingPathComponent("\(clip.id.uuidString).json")

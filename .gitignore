@@ -3,3 +3,4 @@ build/
 *.tipa
 Payload/
 .DS_Store
+build-tests/

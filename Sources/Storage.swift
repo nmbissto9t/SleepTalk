@@ -62,6 +62,42 @@ enum Storage {
         return docs.appendingPathComponent("Sessions", isDirectory: true)
     }
 
+    /// 创建录音目录，并把它排除在 iCloud 和电脑备份之外。
+    static func prepareRoot() {
+        try? FileManager.default.createDirectory(
+            at: root,
+            withIntermediateDirectories: true,
+            attributes: [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication]
+        )
+        var url = root
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        try? url.setResourceValues(values)
+    }
+
+    /// 把一个文件夹打包成临时 zip，用于导出。
+    static func exportArchive(of folder: URL, named name: String) throws -> URL {
+        var coordinationError: NSError?
+        var result: Result<URL, Error>?
+        NSFileCoordinator().coordinate(
+            readingItemAt: folder,
+            options: [.forUploading],
+            error: &coordinationError
+        ) { zipURL in
+            do {
+                let target = FileManager.default.temporaryDirectory.appendingPathComponent("\(name).zip")
+                try? FileManager.default.removeItem(at: target)
+                try FileManager.default.copyItem(at: zipURL, to: target)
+                result = .success(target)
+            } catch {
+                result = .failure(error)
+            }
+        }
+        if let coordinationError { throw coordinationError }
+        guard let result else { throw CocoaError(.fileReadUnknown) }
+        return try result.get()
+    }
+
     static func folder(for id: UUID) -> URL {
         root.appendingPathComponent(id.uuidString, isDirectory: true)
     }
@@ -142,12 +178,17 @@ final class SessionStore: ObservableObject {
     @Published private(set) var sessions: [Session] = []
 
     init() {
+        Storage.prepareRoot()
         recoverUnfinishedSessions()
-        reload()
+        sessions = Storage.loadAll()
     }
 
+    /// 在后台重新读取所有记录。
     func reload() {
-        sessions = Storage.loadAll()
+        DispatchQueue.global(qos: .userInitiated).async {
+            let loaded = Storage.loadAll()
+            DispatchQueue.main.async { self.sessions = loaded }
+        }
     }
 
     func session(id: UUID) -> Session? {
@@ -156,15 +197,14 @@ final class SessionStore: ObservableObject {
 
     func delete(sessionID: UUID) {
         Storage.delete(sessionID: sessionID)
-        reload()
+        sessions.removeAll { $0.id == sessionID }
     }
 
     func delete(clip: Clip, from sessionID: UUID) {
         guard var session = session(id: sessionID) else { return }
         session.clips.removeAll { $0.id == clip.id }
-        try? FileManager.default.removeItem(at: Storage.clipURL(sessionID: sessionID, fileName: clip.fileName))
-        try? Storage.save(session)
-        reload()
+        removeAudio(of: clip, sessionID: sessionID)
+        update(session)
     }
 
     /// 删除一组片段中未收藏的部分。
@@ -173,40 +213,66 @@ final class SessionStore: ObservableObject {
         let targets = clips.filter { !$0.favorite }
         let ids = Set(targets.map(\.id))
         session.clips.removeAll { ids.contains($0.id) }
-        for clip in targets {
-            try? FileManager.default.removeItem(at: Storage.clipURL(sessionID: sessionID, fileName: clip.fileName))
-        }
-        try? Storage.save(session)
-        reload()
-    }
-
-    /// 开关打开时，删除超过保留天数且未收藏的鼾声。不会动梦话、其他片段和进行中的记录。
-    func cleanIfNeeded() {
-        let defaults = UserDefaults.standard
-        guard defaults.bool(forKey: SettingsKey.autoCleanSnore) else { return }
-        let days = max(1, defaults.integer(forKey: SettingsKey.snoreRetentionDays))
-        let cutoff = Date().addingTimeInterval(-Double(days) * 86_400)
-        var changed = false
-        for var session in Storage.loadAll() where session.endedAt != nil {
-            let expired = session.clips.filter { $0.kind == .snore && !$0.favorite && $0.startedAt < cutoff }
-            guard !expired.isEmpty else { continue }
-            let ids = Set(expired.map(\.id))
-            session.clips.removeAll { ids.contains($0.id) }
-            for clip in expired {
-                try? FileManager.default.removeItem(at: Storage.clipURL(sessionID: session.id, fileName: clip.fileName))
-            }
-            try? Storage.save(session)
-            changed = true
-        }
-        if changed { reload() }
+        targets.forEach { removeAudio(of: $0, sessionID: sessionID) }
+        update(session)
     }
 
     func toggleFavorite(clip: Clip, in sessionID: UUID) {
         guard var session = session(id: sessionID),
               let index = session.clips.firstIndex(where: { $0.id == clip.id }) else { return }
         session.clips[index].favorite.toggle()
+        update(session)
+    }
+
+    func setKind(_ kind: ClipKind, for clip: Clip, in sessionID: UUID) {
+        guard var session = session(id: sessionID),
+              let index = session.clips.firstIndex(where: { $0.id == clip.id }) else { return }
+        session.clips[index].kind = kind
+        session.clips[index].kindCorrected = true
+        update(session)
+    }
+
+    /// 按保留规则清理音频。只清理新版本录的片段，不动进行中的记录。
+    func applyRetention(beforeNewSession: Bool) {
+        let defaults = UserDefaults.standard
+        let snoreDays = defaults.bool(forKey: SettingsKey.snoreCleanupEnabled)
+            ? max(1, defaults.integer(forKey: SettingsKey.snoreAudioDays))
+            : nil
+        let now = Date()
+        var changedAny = false
+
+        for var session in Storage.loadAll() where session.endedAt != nil {
+            var changed = false
+            for index in session.clips.indices {
+                let clip = session.clips[index]
+                guard RetentionPolicy.shouldDeleteAudio(
+                    clip,
+                    now: now,
+                    snoreDays: snoreDays,
+                    beforeNewSession: beforeNewSession
+                ) else { continue }
+                removeAudio(of: clip, sessionID: session.id)
+                session.clips[index].audioDeletedAt = now
+                changed = true
+            }
+            if changed {
+                try? Storage.save(session)
+                changedAny = true
+            }
+        }
+        if changedAny { sessions = Storage.loadAll() }
+    }
+
+    private func update(_ session: Session) {
         try? Storage.save(session)
-        reload()
+        if let index = sessions.firstIndex(where: { $0.id == session.id }) {
+            sessions[index] = session
+        }
+    }
+
+    private func removeAudio(of clip: Clip, sessionID: UUID) {
+        try? FileManager.default.removeItem(at: Storage.clipURL(sessionID: sessionID, fileName: clip.fileName))
+        WaveformLoader.removeCache(for: clip)
     }
 
     /// App 启动时还没有结束标记的记录，说明上次监听被系统或手动杀掉了。

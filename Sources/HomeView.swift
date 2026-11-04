@@ -5,6 +5,7 @@ struct HomeView: View {
     @EnvironmentObject private var store: SessionStore
     @State private var showSettings = false
     @State private var confirmStop = false
+    @State private var pendingDeletion: Session?
 
     private var finishedSessions: [Session] {
         store.sessions.filter { $0.id != monitor.activeSessionID }
@@ -28,8 +29,8 @@ struct HomeView: View {
                         }
                     }
                     .onDelete { offsets in
-                        let targets = offsets.map { finishedSessions[$0].id }
-                        targets.forEach { store.delete(sessionID: $0) }
+                        // 整晚删除无法恢复，先确认。
+                        pendingDeletion = offsets.first.map { finishedSessions[$0] }
                     }
                 }
             }
@@ -47,12 +48,28 @@ struct HomeView: View {
                     .accessibilityLabel("设置")
                 }
             }
-            .sheet(isPresented: $showSettings, onDismiss: { store.cleanIfNeeded() }) {
+            .sheet(isPresented: $showSettings, onDismiss: { store.applyRetention(beforeNewSession: false) }) {
                 SettingsView()
             }
-            .confirmationDialog("结束今晚的监听？", isPresented: $confirmStop, titleVisibility: .visible) {
+            .confirmationDialog("结束这次监听？", isPresented: $confirmStop, titleVisibility: .visible) {
                 Button("结束监听", role: .destructive) { monitor.stop() }
                 Button("继续监听", role: .cancel) {}
+            }
+            .confirmationDialog(
+                "删除这晚的全部记录？",
+                isPresented: Binding(
+                    get: { pendingDeletion != nil },
+                    set: { if !$0 { pendingDeletion = nil } }
+                ),
+                titleVisibility: .visible
+            ) {
+                Button("删除", role: .destructive) {
+                    if let target = pendingDeletion { store.delete(sessionID: target.id) }
+                    pendingDeletion = nil
+                }
+                Button("取消", role: .cancel) { pendingDeletion = nil }
+            } message: {
+                Text("包括收藏的片段，删除后无法恢复。")
             }
         }
     }
@@ -71,7 +88,7 @@ struct HomeView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(monitor.status.title).font(.headline)
                     if let started = monitor.startedAt {
-                        Text("\(Format.shortClock(started)) 开始 · 保留 \(monitor.savedClipCount) · 丢弃 \(monitor.discardedCount)")
+                        Text("\(Format.shortClock(started)) 开始 · 梦话 \(monitor.speechClipCount) 段")
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                     }
@@ -100,6 +117,7 @@ struct HomeView: View {
                 if monitor.isActive {
                     confirmStop = true
                 } else {
+                    store.applyRetention(beforeNewSession: true)
                     monitor.start()
                 }
             } label: {
@@ -138,7 +156,7 @@ private struct LevelMeter: View {
                 }
             }
             .frame(height: 8)
-            Text("当前 \(Int(level)) dB · 底噪 \(Int(floor)) dB")
+            Text("环境音量，竖线是房间底噪")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
         }
@@ -151,14 +169,14 @@ private struct SessionRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
-                Text(Format.day(session.startedAt)).font(.headline)
+                Text(Format.nightTitle(session.startedAt)).font(.headline)
                 if session.endedAbnormally || !session.gaps.isEmpty {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .foregroundStyle(.orange)
                         .accessibilityLabel("有未监听的时段")
                 }
             }
-            Text("\(Format.shortClock(session.startedAt))–\(Format.shortClock(session.effectiveEnd)) · 梦话 \(session.count(of: .speech)) 段 · 覆盖 \(Int(session.coverageRatio * 100))%")
+            Text("\(Format.shortClock(session.startedAt))–\(Format.shortClock(session.effectiveEnd)) · 梦话 \(session.count(of: .speech)) 段 · 鼾声 \(Format.duration(session.seconds(of: .snore)))")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
         }
@@ -169,14 +187,27 @@ private struct SessionRow: View {
 struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @AppStorage(SettingsKey.triggerDB) private var triggerDB = 12.0
-    @AppStorage(SettingsKey.keepSnore) private var keepSnore = false
-    @AppStorage(SettingsKey.keepAll) private var keepAll = false
     @AppStorage(SettingsKey.startDelayMinutes) private var startDelayMinutes = 15
     @AppStorage(SettingsKey.amplifyPlayback) private var amplifyPlayback = true
-    @AppStorage(SettingsKey.autoCleanSnore) private var autoCleanSnore = false
-    @AppStorage(SettingsKey.snoreRetentionDays) private var snoreRetentionDays = 30
+    @AppStorage(SettingsKey.snoreCleanupEnabled) private var snoreCleanupEnabled = true
+    @AppStorage(SettingsKey.snoreAudioDays) private var snoreAudioDays = 7
 
     @State private var usage: StorageUsage?
+
+    /// 界面上越大越灵敏，内部的触发门槛则相反。
+    private var sensitivity: Binding<Double> {
+        Binding(
+            get: { 30 - triggerDB },
+            set: { triggerDB = 30 - $0 }
+        )
+    }
+
+    private var versionText: String {
+        let info = Bundle.main.infoDictionary
+        let version = info?["CFBundleShortVersionString"] as? String ?? "未知"
+        let build = info?["CFBundleVersion"] as? String ?? "未知"
+        return "\(version)（\(build)）"
+    }
 
     private func usageRow(_ title: String, _ bytes: Int64) -> some View {
         LabeledContent(title, value: StorageUsage.text(bytes))
@@ -196,23 +227,17 @@ struct SettingsView: View {
                 }
 
                 Section {
-                    VStack(alignment: .leading) {
-                        Text("高于底噪 \(Int(triggerDB)) dB 时开始判断")
-                        Slider(value: $triggerDB, in: 6...24, step: 1)
+                    Slider(value: sensitivity, in: 6...24, step: 1) {
+                        Text("灵敏度")
+                    } minimumValueLabel: {
+                        Text("低").font(.caption)
+                    } maximumValueLabel: {
+                        Text("高").font(.caption)
                     }
                 } header: {
-                    Text("触发灵敏度")
+                    Text("灵敏度")
                 } footer: {
-                    Text("数值越小越灵敏。漏录就调小，误触发太多就调大。")
-                }
-
-                Section {
-                    Toggle("保留鼾声", isOn: $keepSnore)
-                    Toggle("保留所有片段（校准用）", isOn: $keepAll)
-                } header: {
-                    Text("保留范围")
-                } footer: {
-                    Text("第一晚建议打开“保留所有片段”，早上听一遍就能知道有没有被误判而丢掉的梦话。平时关闭以节省空间。")
+                    Text("小声的梦话录不到就调高，翻身等声音录得太多就调低。")
                 }
 
                 Section {
@@ -221,6 +246,19 @@ struct SettingsView: View {
                     Text("回放")
                 } footer: {
                     Text("只影响回放，不影响录音、分类和保存的文件。背景噪声也会一起变大，觉得太吵可以关闭。")
+                }
+
+                Section {
+                    Toggle("自动清理鼾声音频", isOn: $snoreCleanupEnabled)
+                    if snoreCleanupEnabled {
+                        Stepper(value: $snoreAudioDays, in: 1...365) {
+                            Text("保留 \(snoreAudioDays) 天")
+                        }
+                    }
+                } header: {
+                    Text("音频保留")
+                } footer: {
+                    Text("梦话和收藏的片段不会自动删除。“其他”的音频保留到下次开始监听。清理后仍保留时间和统计，但无法再回放。升级前录的旧音频不会被自动清理。")
                 }
 
                 Section {
@@ -233,28 +271,20 @@ struct SettingsView: View {
                     } else {
                         Text("正在统计…").foregroundStyle(.secondary)
                     }
+                    ExportButton(title: "导出全部录音", folder: Storage.root, archiveName: "梦话记录-全部")
                 } header: {
                     Text("占用空间")
                 } footer: {
-                    Text("统计 App 保存的数据，不含 App 本身的安装体积。")
-                }
-
-                Section {
-                    Toggle("自动清理鼾声", isOn: $autoCleanSnore)
-                    if autoCleanSnore {
-                        Stepper(value: $snoreRetentionDays, in: 1...365) {
-                            Text("保留 \(snoreRetentionDays) 天")
-                        }
-                    }
-                } header: {
-                    Text("存储")
-                } footer: {
-                    Text("只删除过期且未收藏的鼾声，不会删除梦话和其他片段。删除后无法恢复。")
+                    Text("统计 App 保存的数据，不含 App 本身的安装体积。录音不进入 iCloud 和电脑备份，卸载或换手机前请先导出。")
                 }
 
                 Section("隐私") {
-                    Text("录音只保存在这台手机上，App 没有任何上传功能。")
+                    Text("录音只保存在这台手机上，App 没有任何上传功能，只有你主动导出或分享时才会离开手机。录音可能包含同屋其他人的声音。")
                         .foregroundStyle(.secondary)
+                }
+
+                Section {
+                    LabeledContent("版本", value: versionText)
                 }
             }
             .task {

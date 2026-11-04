@@ -34,6 +34,31 @@ struct Clip: Codable, Identifiable, Hashable {
     var topLabel: String
     var peakDB: Float
     var favorite: Bool = false
+    /// 只有新版本录的片段才为 true；旧录音不参与自动清理。
+    var autoCleanable: Bool? = nil
+    /// 音频被自动清理的时间。时间、类型等信息仍保留，用于统计。
+    var audioDeletedAt: Date? = nil
+    /// 用户手动改过分类。
+    var kindCorrected: Bool? = nil
+
+    var hasAudio: Bool { audioDeletedAt == nil }
+}
+
+/// 决定哪些音频可以自动删除。
+enum RetentionPolicy {
+    /// snoreDays 为 nil 表示不自动清理鼾声。
+    static func shouldDeleteAudio(_ clip: Clip, now: Date, snoreDays: Int?, beforeNewSession: Bool) -> Bool {
+        guard clip.hasAudio, clip.autoCleanable == true, !clip.favorite else { return false }
+        switch clip.kind {
+        case .speech:
+            return false
+        case .other:
+            return beforeNewSession
+        case .snore:
+            guard let snoreDays else { return false }
+            return clip.startedAt < now.addingTimeInterval(-Double(snoreDays) * 86_400)
+        }
+    }
 }
 
 /// 一段确认在监听的时间。相邻两段之间的空档就是“未监听”。
@@ -57,6 +82,8 @@ struct Session: Codable, Identifiable, Hashable {
     var clips: [Clip] = []
     var discardedCount: Int = 0
     var events: [LogEvent] = []
+    /// 因存储空间不足而没有录下的次数。
+    var storageSkippedCount: Int? = nil
 
     var effectiveEnd: Date {
         endedAt ?? coverage.last?.end ?? startedAt
@@ -149,22 +176,18 @@ enum TimelineItem: Identifiable {
 
 enum SettingsKey {
     static let triggerDB = "triggerDB"
-    static let keepSnore = "keepSnore"
-    static let keepAll = "keepAll"
     static let startDelayMinutes = "startDelayMinutes"
     static let amplifyPlayback = "amplifyPlayback"
-    static let autoCleanSnore = "autoCleanSnore"
-    static let snoreRetentionDays = "snoreRetentionDays"
+    static let snoreCleanupEnabled = "snoreCleanupEnabled"
+    static let snoreAudioDays = "snoreAudioDays"
 
     static func registerDefaults() {
         UserDefaults.standard.register(defaults: [
             triggerDB: 12.0,
-            keepSnore: false,
-            keepAll: false,
             startDelayMinutes: 15,
             amplifyPlayback: true,
-            autoCleanSnore: false,
-            snoreRetentionDays: 30
+            snoreCleanupEnabled: true,
+            snoreAudioDays: 7
         ])
     }
 }
@@ -187,7 +210,7 @@ enum Format {
     private static let dayFormatter: DateFormatter = {
         let f = DateFormatter()
         f.locale = Locale(identifier: "zh_CN")
-        f.dateFormat = "M月d日 EEE"
+        f.dateFormat = "M月d日"
         return f
     }()
 
@@ -209,7 +232,18 @@ enum Format {
         return "\(total / 60):" + String(format: "%02d", total % 60)
     }
     static func shortClock(_ date: Date) -> String { shortClockFormatter.string(from: date) }
-    static func day(_ date: Date) -> String { dayFormatter.string(from: date) }
+
+    /// 记录标题：凌晨开始算前一天夜里，傍晚以后算当天夜里，白天则显示具体时间。
+    static func nightTitle(_ date: Date, calendar: Calendar = .current) -> String {
+        let hour = calendar.component(.hour, from: date)
+        if hour < 6, let previous = calendar.date(byAdding: .day, value: -1, to: date) {
+            return "\(dayFormatter.string(from: previous))夜"
+        }
+        if hour >= 18 {
+            return "\(dayFormatter.string(from: date))夜"
+        }
+        return "\(dayFormatter.string(from: date)) \(shortClockFormatter.string(from: date))"
+    }
 
     static func duration(_ seconds: TimeInterval) -> String {
         let total = Int(seconds.rounded())
