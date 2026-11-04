@@ -183,6 +183,12 @@ struct SettingsView: View {
     @AppStorage(SettingsKey.autoCleanSnore) private var autoCleanSnore = false
     @AppStorage(SettingsKey.snoreRetentionDays) private var snoreRetentionDays = 30
 
+    @State private var usage: StorageUsage?
+
+    private func usageRow(_ title: String, _ bytes: Int64) -> some View {
+        LabeledContent(title, value: StorageUsage.text(bytes))
+    }
+
     private var autoStopTime: Binding<Date> {
         Binding(
             get: {
@@ -246,6 +252,22 @@ struct SettingsView: View {
                 }
 
                 Section {
+                    if let usage {
+                        usageRow("总共占用", usage.total)
+                        usageRow("梦话", usage.speech)
+                        usageRow("鼾声", usage.snore)
+                        usageRow("其他片段", usage.other)
+                        usageRow("记录和缓存", usage.misc)
+                    } else {
+                        Text("正在统计…").foregroundStyle(.secondary)
+                    }
+                } header: {
+                    Text("占用空间")
+                } footer: {
+                    Text("统计 App 保存的数据，不含 App 本身的安装体积。")
+                }
+
+                Section {
                     Toggle("自动清理鼾声", isOn: $autoCleanSnore)
                     if autoCleanSnore {
                         Stepper(value: $snoreRetentionDays, in: 1...365) {
@@ -262,6 +284,9 @@ struct SettingsView: View {
                     Text("录音只保存在这台手机上，App 没有任何上传功能。")
                         .foregroundStyle(.secondary)
                 }
+            }
+            .task {
+                usage = await Task.detached(priority: .utility) { Storage.usage() }.value
             }
             .navigationTitle("设置")
             .navigationBarTitleDisplayMode(.inline)

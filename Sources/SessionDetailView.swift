@@ -210,6 +210,15 @@ struct SessionDetailView: View {
 /// 打开记录时最先看到的摘要：几个关键数字，加一条整晚的事件轴。
 private struct SessionSummaryView: View {
     let session: Session
+    @State private var clipBytes: Int64?
+
+    private var footnote: String {
+        var text = "实际监听 \(Format.duration(session.coveredSeconds)) · 丢弃 \(session.discardedCount) 段"
+        if let clipBytes {
+            text += " · 录音占用 \(StorageUsage.text(clipBytes))"
+        }
+        return text
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -240,11 +249,15 @@ private struct SessionSummaryView: View {
             .font(.caption2)
             .foregroundStyle(.secondary)
 
-            Text("实际监听 \(Format.duration(session.coveredSeconds)) · 丢弃 \(session.discardedCount) 段")
+            Text(footnote)
                 .font(.footnote)
                 .foregroundStyle(.secondary)
         }
         .padding(.vertical, 4)
+        .task(id: session.clips.count) {
+            let current = session
+            clipBytes = await Task.detached(priority: .utility) { Storage.clipBytes(in: current) }.value
+        }
     }
 
     private func stat(title: String, value: String) -> some View {

@@ -6,7 +6,7 @@ import SwiftUI
 enum WaveformLoader {
     private static let rawBarCount = 120
 
-    private static var cacheFolder: URL {
+    static var cacheFolder: URL {
         FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Waveforms", isDirectory: true)
     }

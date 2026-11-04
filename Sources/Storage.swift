@@ -3,7 +3,60 @@ import Combine
 
 /// 每晚一个文件夹：Documents/Sessions/<uuid>/session.json 加若干 .m4a。
 /// 使用“首次解锁后可访问”的保护级别，否则锁屏时写不进去。
+struct StorageUsage: Equatable {
+    var speech: Int64 = 0
+    var snore: Int64 = 0
+    var other: Int64 = 0
+    /// session.json、波形缓存等，以及没有登记到记录里的文件。
+    var misc: Int64 = 0
+
+    var total: Int64 { speech + snore + other + misc }
+
+    static func text(_ bytes: Int64) -> String {
+        ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+    }
+}
+
 enum Storage {
+    /// 一条记录中所有音频片段占用的字节数。
+    static func clipBytes(in session: Session) -> Int64 {
+        session.clips.reduce(0) { $0 + fileSize(clipURL(sessionID: session.id, fileName: $1.fileName)) }
+    }
+
+    /// 统计 App 保存的数据，不含 App 本身的安装体积。
+    static func usage() -> StorageUsage {
+        var result = StorageUsage()
+        for session in loadAll() {
+            for clip in session.clips {
+                let size = fileSize(clipURL(sessionID: session.id, fileName: clip.fileName))
+                switch clip.kind {
+                case .speech: result.speech += size
+                case .snore: result.snore += size
+                case .other: result.other += size
+                }
+            }
+        }
+        let everything = folderSize(root) + folderSize(WaveformLoader.cacheFolder)
+        result.misc = max(0, everything - result.speech - result.snore - result.other)
+        return result
+    }
+
+    private static func fileSize(_ url: URL) -> Int64 {
+        let values = try? url.resourceValues(forKeys: [.fileSizeKey])
+        return Int64(values?.fileSize ?? 0)
+    }
+
+    private static func folderSize(_ url: URL) -> Int64 {
+        guard let files = FileManager.default.enumerator(at: url, includingPropertiesForKeys: [.fileSizeKey]) else {
+            return 0
+        }
+        var total: Int64 = 0
+        for case let file as URL in files {
+            total += fileSize(file)
+        }
+        return total
+    }
+
     static var root: URL {
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         return docs.appendingPathComponent("Sessions", isDirectory: true)
